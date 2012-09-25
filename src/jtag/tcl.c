@@ -925,6 +925,19 @@ void jtag_notify_event(enum jtag_event event)
 		jtag_tap_handle_event(tap, event);
 }
 
+COMMAND_HANDLER(handle_swd_trn_command)
+{
+	if (CMD_ARGC != 1)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	unsigned temp = 0;
+	COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], temp);
+
+	swd_trn = (uint8_t)temp;
+	LOG_INFO("OpenOCD runs in SWD mode");
+
+	return ERROR_OK;
+}
 
 COMMAND_HANDLER(handle_scan_chain_command)
 {
@@ -1273,6 +1286,13 @@ COMMAND_HANDLER(handle_wait_srst_deassert)
 
 static const struct command_registration jtag_command_handlers[] = {
 
+	{
+		.name = "swd_trn",
+		.handler = handle_swd_trn_command,
+		.mode = COMMAND_ANY,
+		.help = "use swd instead of jtag",
+		.usage = "[swd_trn]",
+	},
 	{
 		.name = "jtag_flush_queue_sleep",
 		.handler = handle_jtag_flush_queue_sleep,

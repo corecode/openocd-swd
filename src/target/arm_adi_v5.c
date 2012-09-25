@@ -585,7 +585,7 @@ int mem_ap_read_buf_u32(struct adiv5_dap *dap, uint8_t *buffer,
 		 */
 
 		/* Scan out first read */
-		retval = adi_jtag_dp_scan(dap, JTAG_DP_APACC, AP_REG_DRW,
+		retval = dap_queue_dp_scan(dap, JTAG_DP_APACC, AP_REG_DRW,
 				DPAP_READ, 0, NULL, NULL);
 		if (retval != ERROR_OK)
 			return retval;
@@ -594,7 +594,7 @@ int mem_ap_read_buf_u32(struct adiv5_dap *dap, uint8_t *buffer,
 			 * previous one.  Assumes read is acked "OK/FAULT",
 			 * and CTRL_STAT says that meant "OK".
 			 */
-			retval = adi_jtag_dp_scan(dap, JTAG_DP_APACC, AP_REG_DRW,
+			retval = dap_queue_dp_scan(dap, JTAG_DP_APACC, AP_REG_DRW,
 					DPAP_READ, 0, buffer + 4 * readcount,
 					&dap->ack);
 			if (retval != ERROR_OK)
@@ -604,7 +604,7 @@ int mem_ap_read_buf_u32(struct adiv5_dap *dap, uint8_t *buffer,
 		/* Scan in last posted value; RDBUFF has no other effect,
 		 * assuming ack is OK/FAULT and CTRL_STAT says "OK".
 		 */
-		retval = adi_jtag_dp_scan(dap, JTAG_DP_DPACC, DP_RDBUFF,
+		retval = dap_queue_dp_scan(dap, JTAG_DP_DPACC, DP_RDBUFF,
 				DPAP_READ, 0, buffer + 4 * readcount,
 				&dap->ack);
 		if (retval != ERROR_OK)
@@ -1073,6 +1073,7 @@ int dap_syssec(struct adiv5_dap *dap)
  * part of DAP transport setup
 */
 extern const struct dap_ops jtag_dp_ops;
+extern const struct dap_ops swd_dp_ops;
 
 /*--------------------------------------------------------------------------*/
 
@@ -1100,8 +1101,17 @@ int ahbap_debugport_init(struct adiv5_dap *dap)
 	 * ... for SWD mode this is patched as part
 	 * of link switchover
 	 */
-	if (!dap->ops)
+	if (transport_is_swd())
+	{
+		dap->ops = &swd_dp_ops;
+
+		dap_to_swd(NULL);
+		dap_queue_idcode_read(dap, NULL, NULL);
+	}
+	else
+	{
 		dap->ops = &jtag_dp_ops;
+	}
 
 	/* Default MEM-AP setup.
 	 *
@@ -1118,9 +1128,18 @@ int ahbap_debugport_init(struct adiv5_dap *dap)
 	if (retval != ERROR_OK)
 		return retval;
 
-	retval = dap_queue_dp_write(dap, DP_CTRL_STAT, SSTICKYERR);
-	if (retval != ERROR_OK)
-		return retval;
+	if (transport_is_swd())
+	{
+		retval = dap_queue_dp_write(dap, DP_ABORT, DAPABORT | STKERRCLR | WDERRCLR | ORUNERRCLR);
+		if (retval != ERROR_OK)
+			return retval;
+	}
+	else
+	{
+		retval = dap_queue_dp_write(dap, DP_CTRL_STAT, SSTICKYERR);
+		if (retval != ERROR_OK)
+			return retval;
+	}
 
 	retval = dap_queue_dp_read(dap, DP_CTRL_STAT, NULL);
 	if (retval != ERROR_OK)

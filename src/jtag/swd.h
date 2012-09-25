@@ -136,4 +136,6 @@ void swd_add_reset(int req_srst);
 
 bool transport_is_swd(void);
 
+extern uint8_t swd_trn;
+
 #endif /* SWD_H */

@@ -28,6 +28,7 @@
 #define OPENOCD_JTAG_INTERFACE_H
 
 #include <jtag/jtag.h>
+#include <jtag/swd.h>
 
 /* @file
  * The "Cable Helper API" is what the cable drivers can use to help
@@ -36,7 +37,6 @@
  * Cable API.  A "Cable API" is what higher level code used to talk to a
  * cable.
  */
-
 
 /** implementation of wrapper function tap_set_state() */
 void tap_set_state_impl(tap_state_t new_state);

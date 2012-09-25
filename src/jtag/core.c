@@ -45,6 +45,8 @@
 #include "svf/svf.h"
 #include "xsvf/xsvf.h"
 
+uint8_t swd_trn;
+
 /** The number of JTAG queue flushes (for profiling and debugging purposes). */
 static int jtag_flush_queue_count;
 
@@ -1821,4 +1823,25 @@ void adapter_deassert_reset(void)
 			get_current_transport()->name);
 	else
 		LOG_ERROR("transport is not selected");
+}
+
+void swd_add_sequence(uint8_t *seq, uint16_t len)
+{
+	int retval;
+	retval = interface_swd_add_sequence(seq, len);
+	jtag_set_error(retval);
+}
+
+void swd_add_transact_out(uint8_t apndp, uint8_t rnw, uint8_t reg, uint32_t out_value, uint8_t* ack)
+{
+	int retval;
+	retval = interface_swd_add_transact_out(apndp, rnw, reg, out_value, ack);
+	jtag_set_error(retval);
+}
+
+void swd_add_transact_in(uint8_t apndp, uint8_t rnw, uint8_t reg, uint32_t * in_value, uint8_t* ack)
+{
+	int retval;
+	retval = interface_swd_add_transact_in(apndp, rnw, reg, in_value, ack);
+	jtag_set_error(retval);
 }
