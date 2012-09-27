@@ -87,7 +87,7 @@
 #include "mpsse.h"
 
 #define JTAG_MODE (LSB_FIRST | POS_EDGE_IN | NEG_EDGE_OUT)
-#define SWD_MODE (LSB_FIRST | NEG_EDGE_IN | NEG_EDGE_OUT)
+#define SWD_MODE (LSB_FIRST | POS_EDGE_IN | NEG_EDGE_OUT)
 
 static char *ftdi_device_desc;
 static char *ftdi_serial;
@@ -641,8 +641,8 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 	 * etc.
 	 *
 	 * However, in practice it seems that we need to do exactly
-	 * the opposite:  transfers only work if we go one clock short
-	 * on write->read and one clock longer on read->write.
+	 * the opposite:  transfers only work if we read on positive
+	 * edge, without any change in turns.
 	 *
 	 * It would be good to find the reason for this.
 	 */
@@ -658,7 +658,7 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 
 	/* (1b) turn to input mode */
 	DEBUG_JTAG_IO("SWD turning to receive %d", swd_trn);
-	retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn - 1, SWD_MODE);
+	retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
 	retval |= ftdi_set_signal(swdoe, '0');
 
 	/* (2) ack */
@@ -674,7 +674,7 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 	 */
 	if (out || ack != SWD_ACK_OK) {
 		DEBUG_JTAG_IO("SWD turning to send %d", swd_trn);
-		retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn + 1, SWD_MODE);
+		retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
 		retval |= ftdi_set_signal(swdoe, '1');
 	}
 
@@ -701,7 +701,7 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 		retval |= mpsse_clock_data_in(mpsse_ctx, (void *)&data, 0, 32, SWD_MODE);
 		retval |= mpsse_clock_data_in(mpsse_ctx, &parity, 0, 1, SWD_MODE);
 		/* (3b) */
-		retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn + 1, SWD_MODE);
+		retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
 		retval |= ftdi_set_signal(swdoe, '1');
 		retval |= mpsse_flush(mpsse_ctx);
 
