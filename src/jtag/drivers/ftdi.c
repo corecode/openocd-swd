@@ -607,47 +607,26 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 	 *
 	 * Bit clock:
 	 * The SWD port reads and writes on positive edge.  This means
-	 * we have to write and read on negative edge.  However, if we
-	 * write on negative edge, the SWD port will always lag one
-	 * bit behind our idea of the current state:
+	 * we have to write on negative edge and can read on positive
+	 * edge.  The FTDI chip supports write on negative edge and
+	 * read on positive edge;  the clock cycle is
+	 * low(t/2)-high(t/2)-low.  This means that the FTDI will
+	 * drive the data out line first, then wait half a cycle,
+	 * sample data and transition clk to high, wait for another
+	 * half cycle, and finally transition the clock back to low.
 	 *
 	 *
-	 *        write                      read
-	 *        _   _   _   _   _        _   _   _   _   _
-	 * clk  _| |_| |_| |_| |_| |_    _| |_| |_| |_| |_| |_
+	 *               write     turn         read
+	 *         1111222233334444555566667777888899990000
+	 *           __  __  __  __  __  __  __  __  __  __
+	 * clk ______  __  __  __  __  __  __  __  __  __  ____
 	 *
-	 * we    1   0   1   0   1           0   1   0   1   0
-	 *        \   \   \   \   \         /   /   /   /   /
-	 *          ___     ___     _    _     ___     ___
-	 * data ___|   |___|   |___|      |___|   |___|   |___
-	 *       |   |   |   |   |   \    |   |   |   |   |
-	 * port  0   1   0   1   0   |    0   1   0   1   0
-	 *                           |
-	 *              (not read yet)
-	 *
-	 * This means that we need to turn one clock longer when going
-	 * from write->read, and one clock shorter when going from
-	 * read->write:
-	 *
-	 *    we           port
-	 * W  park      R  stop
-	 * W  turn (1)  R  park
-	 * -  turn (2)  -  turn (1)
-	 * R  ACK (1)   W  ACK (1)
-	 * R  ACK (2)   W  ACK (2)
-	 * R  ACK (3)   W  ACK (3)
-	 * W  data (1)  -  turn
-	 * W  data (2)  R  data (1)
-	 * etc.
-	 *
-	 * However, in practice it seems that we need to do exactly
-	 * the opposite:  transfers only work if we read on positive
-	 * edge, without any change in turns.
-	 *
-	 * Nevermind.  Now ACKs are read correctly, but the data
-	 * following them isn't.
-	 *
-	 * It would be good to find the reason for this.
+	 * we      1   0   1   0   z      1   0   1   0   1
+	 *         v   v   v   v   v     /   /   /   /   /
+	 *         ____    ____      ____    ____    ____
+	 * data xxx    ____    ____zz    ____    ____
+	 *           v   v   v   v   ^   ^   ^   ^   ^
+	 * port      1   0   1   0   1   0   1   0   1
 	 */
 
 	/* upper layers already calculated the parity, etc. */
@@ -661,8 +640,8 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 
 	/* (1b) turn to input mode */
 	DEBUG_JTAG_IO("SWD turning to receive %d", swd_trn);
-	retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
 	retval |= ftdi_set_signal(swdoe, '0');
+	retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
 
 	/* (2) ack */
 	uint8_t ack = 0;
