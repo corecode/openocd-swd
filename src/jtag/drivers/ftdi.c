@@ -603,6 +603,48 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 	 * host read: 1, 1b, 2, 3, 3b
 	 * target wait or fault: 1, 1b, 2, 2b
 	 * target protocol error: 1, (1b not driven by target)
+	 *
+	 *
+	 * Bit clock:
+	 * The SWD port reads and writes on positive edge.  This means
+	 * we have to write and read on negative edge.  However, if we
+	 * write on negative edge, the SWD port will always lag one
+	 * bit behind our idea of the current state:
+	 *
+	 *
+	 *        write                      read
+	 *        _   _   _   _   _        _   _   _   _   _
+	 * clk  _| |_| |_| |_| |_| |_    _| |_| |_| |_| |_| |_
+	 *
+	 * we    1   0   1   0   1           0   1   0   1   0
+	 *        \   \   \   \   \         /   /   /   /   /
+	 *          ___     ___     _    _     ___     ___
+	 * data ___|   |___|   |___|      |___|   |___|   |___
+	 *       |   |   |   |   |   \    |   |   |   |   |
+	 * port  0   1   0   1   0   |    0   1   0   1   0
+	 *                           |
+	 *              (not read yet)
+	 *
+	 * This means that we need to turn one clock longer when going
+	 * from write->read, and one clock shorter when going from
+	 * read->write:
+	 *
+	 *    we           port
+	 * W  park      R  stop
+	 * W  turn (1)  R  park
+	 * -  turn (2)  -  turn (1)
+	 * R  ACK (1)   W  ACK (1)
+	 * R  ACK (2)   W  ACK (2)
+	 * R  ACK (3)   W  ACK (3)
+	 * W  data (1)  -  turn
+	 * W  data (2)  R  data (1)
+	 * etc.
+	 *
+	 * However, in practice it seems that we need to do exactly
+	 * the opposite:  transfers only work if we go one clock short
+	 * on write->read and one clock longer on read->write.
+	 *
+	 * It would be good to find the reason for this.
 	 */
 
 	/* upper layers already calculated the parity, etc. */
@@ -610,14 +652,14 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 	int out = !(req & SWD_CMD_RnW);
 
 	/* (1) request */
-	DEBUG_JTAG_IO("SWD request %#02x", req);
+	DEBUG_JTAG_IO("SWD request %#02x (%s)", req, out ? "write" : "read");
 	retval |= ftdi_set_signal(swdoe, '1');
 	retval |= mpsse_clock_data_out(mpsse_ctx, &req, 0, 8, SWD_MODE);
 
 	/* (1b) turn to input mode */
 	DEBUG_JTAG_IO("SWD turning to receive %d", swd_trn);
+	retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn - 1, SWD_MODE);
 	retval |= ftdi_set_signal(swdoe, '0');
-	retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
 
 	/* (2) ack */
 	uint8_t ack = 0;
@@ -632,7 +674,7 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 	 */
 	if (out || ack != SWD_ACK_OK) {
 		DEBUG_JTAG_IO("SWD turning to send %d", swd_trn);
-		retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
+		retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn + 1, SWD_MODE);
 		retval |= ftdi_set_signal(swdoe, '1');
 	}
 
@@ -659,7 +701,7 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 		retval |= mpsse_clock_data_in(mpsse_ctx, (void *)&data, 0, 32, SWD_MODE);
 		retval |= mpsse_clock_data_in(mpsse_ctx, &parity, 0, 1, SWD_MODE);
 		/* (3b) */
-		retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
+		retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn + 1, SWD_MODE);
 		retval |= ftdi_set_signal(swdoe, '1');
 		retval |= mpsse_flush(mpsse_ctx);
 
@@ -684,10 +726,13 @@ out:
 	if (cmd->cmd.swd_transact->ack)
 		*cmd->cmd.swd_transact->ack = ack;
 
+#if 0
 	/* we need to clock at least 8 clock edges for the DAP */
 	DEBUG_JTAG_IO("SWD sending trailing clock pulses");
-	uint8_t ones = 0xff;
-	retval |= mpsse_clock_data_out(mpsse_ctx, &ones, 0, 8, SWD_MODE);
+	uint8_t zeros = 0;
+	retval |= mpsse_clock_data_out(mpsse_ctx, &zeros, 0, 8, SWD_MODE);
+#endif
+
 	retval |= mpsse_flush(mpsse_ctx);
 
 	return (retval);
