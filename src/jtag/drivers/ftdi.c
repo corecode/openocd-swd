@@ -644,6 +644,9 @@ static int ftdi_execute_swd_transact(struct jtag_command *cmd)
 	 * the opposite:  transfers only work if we read on positive
 	 * edge, without any change in turns.
 	 *
+	 * Nevermind.  Now ACKs are read correctly, but the data
+	 * following them isn't.
+	 *
 	 * It would be good to find the reason for this.
 	 */
 
