@@ -45,7 +45,7 @@
 #include "svf/svf.h"
 #include "xsvf/xsvf.h"
 
-uint8_t swd_trn;
+uint8_t swd_trn = 1;
 
 /** The number of JTAG queue flushes (for profiling and debugging purposes). */
 static int jtag_flush_queue_count;
