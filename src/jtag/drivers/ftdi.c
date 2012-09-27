@@ -74,6 +74,8 @@
 #include <jtag/interface.h>
 #include <transport/transport.h>
 #include <helper/time_support.h>
+#include <helper/types.h>
+#include <jtag/swd.h>
 
 #if IS_CYGWIN == 1
 #include <windows.h>
@@ -85,6 +87,7 @@
 #include "mpsse.h"
 
 #define JTAG_MODE (LSB_FIRST | POS_EDGE_IN | NEG_EDGE_OUT)
+#define SWD_MODE (LSB_FIRST | NEG_EDGE_IN | NEG_EDGE_OUT)
 
 static char *ftdi_device_desc;
 static char *ftdi_serial;
@@ -553,9 +556,168 @@ static int ftdi_execute_stableclocks(struct jtag_command *cmd)
 	return retval;
 }
 
+static int ftdi_execute_swd_seq(struct jtag_command *cmd)
+{
+	struct signal *swdoe = find_signal_by_name("SWDOE");
+	int retval = 0;
+
+	DEBUG_JTAG_IO("SWD sending raw sequence, length %d bits",
+		      cmd->cmd.swd_seq->num_bits);
+	retval |= ftdi_set_signal(swdoe, '1');
+	retval |= mpsse_clock_data_out(mpsse_ctx,
+				       cmd->cmd.swd_seq->bits, 0,
+				       cmd->cmd.swd_seq->num_bits,
+				       SWD_MODE);
+	return (retval);
+}
+
+static int data_parity(uint32_t data)
+{
+	data ^= data >> 16;
+	data ^= data >> 8;
+	data ^= data >> 4;
+	data ^= data >> 2;
+	data ^= data >> 1;
+	return (data & 1);
+}
+
+static int ftdi_execute_swd_transact(struct jtag_command *cmd)
+{
+	struct signal *swdoe = find_signal_by_name("SWDOE");
+	int retval = 0;
+
+	/**
+	 * SWD transaction format:
+	 * from http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0413c/Babbdfad.html
+	 *
+	 * 1. request (8 bits MOSI)
+	 * 1b. turn (default 1 phase)
+	 * 2. ACK (3 bit MISO)
+	 * (2b. turn)
+	 * 3. data (32 bits, LSB first) + parity (1 bit)
+	 * (3b. turn)
+	 *
+	 * depending on request direction and success:
+	 *
+	 * host write: 1, 1b, 2, 2b, 3
+	 * host read: 1, 1b, 2, 3, 3b
+	 * target wait or fault: 1, 1b, 2, 2b
+	 * target protocol error: 1, (1b not driven by target)
+	 */
+
+	/* upper layers already calculated the parity, etc. */
+	uint8_t req = cmd->cmd.swd_transact->request;
+	int out = !(req & SWD_CMD_RnW);
+
+	/* (1) request */
+	DEBUG_JTAG_IO("SWD request %#02x", req);
+	retval |= ftdi_set_signal(swdoe, '1');
+	retval |= mpsse_clock_data_out(mpsse_ctx, &req, 0, 8, SWD_MODE);
+
+	/* (1b) turn to input mode */
+	DEBUG_JTAG_IO("SWD turning to receive %d", swd_trn);
+	retval |= ftdi_set_signal(swdoe, '0');
+	retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
+
+	/* (2) ack */
+	uint8_t ack = 0;
+	retval |= mpsse_clock_data_in(mpsse_ctx, &ack, 0, 3, SWD_MODE);
+	retval |= mpsse_flush(mpsse_ctx);
+	DEBUG_JTAG_IO("SWD ACK %d", ack);
+
+	/**
+	 * (2b)
+	 * We have to turn if this is a write, or if the command was
+	 * not successful.
+	 */
+	if (out || ack != SWD_ACK_OK) {
+		DEBUG_JTAG_IO("SWD turning to send %d", swd_trn);
+		retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
+		retval |= ftdi_set_signal(swdoe, '1');
+	}
+
+	if (ack != SWD_ACK_OK) {
+		DEBUG_JTAG_IO("SWD ACK not OK, returning early");
+		goto out;
+	}
+
+	/* (3) */
+	if (out) {
+		uint32_t data = *cmd->cmd.swd_transact->data;
+		uint8_t parity = data_parity(data);
+
+		DEBUG_JTAG_IO("SWD sending data %08" PRIx32 " parity %d", data, parity);
+
+		h_u32_to_le((void *)&data, data);
+
+		retval |= mpsse_clock_data_out(mpsse_ctx, (void *)&data, 0, 32, SWD_MODE);
+		retval |= mpsse_clock_data_out(mpsse_ctx, &parity, 0, 1, SWD_MODE);
+	} else /* read */ {
+		uint32_t data = 0;
+		uint8_t parity = 1;
+
+		retval |= mpsse_clock_data_in(mpsse_ctx, (void *)&data, 0, 32, SWD_MODE);
+		retval |= mpsse_clock_data_in(mpsse_ctx, &parity, 0, 1, SWD_MODE);
+		/* (3b) */
+		retval |= mpsse_clock_data_in(mpsse_ctx, NULL, 0, swd_trn, SWD_MODE);
+		retval |= ftdi_set_signal(swdoe, '1');
+		retval |= mpsse_flush(mpsse_ctx);
+
+		data = le_to_h_u32((void *)&data);
+
+		DEBUG_JTAG_IO("SWD received data %08" PRIx32 " parity %d, expect parity %d",
+			      data, parity, data_parity(data));
+		DEBUG_JTAG_IO("SWD turning to send %d", swd_trn);
+
+		/**
+		 * XXX we're missing a way to communicate parity
+		 * errors up the stack.  Should we retry a bit?
+		 */
+		if (data_parity(data) != parity) {
+			DEBUG_JTAG_IO("SWD invalid data parity, returning failure");
+			ack = 0xff;
+			goto out;
+		}
+	}
+
+out:
+	if (cmd->cmd.swd_transact->ack)
+		*cmd->cmd.swd_transact->ack = ack;
+
+	/* we need to clock at least 8 clock edges for the DAP */
+	DEBUG_JTAG_IO("SWD sending trailing clock pulses");
+	uint8_t ones = 0xff;
+	retval |= mpsse_clock_data_out(mpsse_ctx, &ones, 0, 8, SWD_MODE);
+	retval |= mpsse_flush(mpsse_ctx);
+
+	return (retval);
+}
+
 static int ftdi_execute_command(struct jtag_command *cmd)
 {
 	int retval;
+
+	switch (cmd->type) {
+		case JTAG_SLEEP:
+		case JTAG_RESET:
+			/* These are okay in both SWD and JTAG */
+			break;
+
+		case SWD_SEQ:
+		case SWD_TRANSACT:
+			if (!transport_is_swd()) {
+				LOG_ERROR("BUG: SWD command in JTAG mode");
+				return ERROR_JTAG_QUEUE_FAILED;
+			}
+			break;
+
+		default:
+			if (transport_is_swd()) {
+				LOG_ERROR("BUG: JTAG command in SWD mode");
+				return ERROR_JTAG_QUEUE_FAILED;
+			}
+			break;
+	}
 
 	switch (cmd->type) {
 		case JTAG_RESET:
@@ -581,6 +743,12 @@ static int ftdi_execute_command(struct jtag_command *cmd)
 			break;
 		case JTAG_TMS:
 			retval = ftdi_execute_tms(cmd);
+			break;
+		case SWD_SEQ:
+			retval = ftdi_execute_swd_seq(cmd);
+			break;
+		case SWD_TRANSACT:
+			retval = ftdi_execute_swd_transact(cmd);
 			break;
 		default:
 			LOG_ERROR("BUG: unknown JTAG command type encountered: %d", cmd->type);
@@ -663,7 +831,10 @@ COMMAND_HANDLER(ftdi_handle_device_desc_command)
 	if (CMD_ARGC == 1) {
 		if (ftdi_device_desc)
 			free(ftdi_device_desc);
-		ftdi_device_desc = strdup(CMD_ARGV[0]);
+		if (strlen(CMD_ARGV[0]) > 0)
+			ftdi_device_desc = strdup(CMD_ARGV[0]);
+		else
+			ftdi_device_desc = NULL;
 	} else {
 		LOG_ERROR("expected exactly one argument to ftdi_device_desc <description>");
 	}
@@ -676,7 +847,10 @@ COMMAND_HANDLER(ftdi_handle_serial_command)
 	if (CMD_ARGC == 1) {
 		if (ftdi_serial)
 			free(ftdi_serial);
-		ftdi_serial = strdup(CMD_ARGV[0]);
+		if (strlen(CMD_ARGV[0]) > 0)
+			ftdi_serial = strdup(CMD_ARGV[0]);
+		else
+			ftdi_serial = NULL;
 	} else {
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
@@ -865,11 +1039,13 @@ static const struct command_registration ftdi_command_handlers[] = {
 	COMMAND_REGISTRATION_DONE
 };
 
+static const char *jtag_and_swd[] = { "jtag", "swd", NULL };
+
 struct jtag_interface ftdi_interface = {
 	.name = "ftdi",
 	.supported = DEBUG_CAP_TMS_SEQ,
 	.commands = ftdi_command_handlers,
-	.transports = jtag_only,
+	.transports = jtag_and_swd,
 
 	.init = ftdi_initialize,
 	.quit = ftdi_quit,
