@@ -42,11 +42,6 @@
 #define SWD_DP_DPACC		0
 #define SWD_DP_APACC		1
 
-/* three-bit ACK values for SWD access (sent LSB first) */
-#define SWD_ACK_OK		0x1
-#define SWD_ACK_WAIT		0x2
-#define SWD_ACK_FAULT		0x4
-
 #define DPAP_WRITE		0
 #define DPAP_READ		1
 

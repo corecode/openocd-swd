@@ -32,6 +32,11 @@
 #define SWD_CMD_PARK	(0 << 7)	/* not driven by host (pull high) */
 /* followed by TRN, 3-bits of ACK, TRN */
 
+/* three-bit ACK values for SWD access (sent LSB first) */
+#define SWD_ACK_OK		0x1
+#define SWD_ACK_WAIT		0x2
+#define SWD_ACK_FAULT		0x4
+
 /* pbit16 holds precomputed parity bits for each nibble */
 #define pbit(parity, nibble) (parity << nibble)
 
